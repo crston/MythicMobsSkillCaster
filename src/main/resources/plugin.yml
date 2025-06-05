@@ -1,0 +1,10 @@
+name: MythicMobsSkillCaster
+main: com.gmail.bobason01.MythicMobsSkillCaster
+version: 3.0
+api-version: 1.16
+commands:
+  mmskills:
+    description: Cast a MythicMobs skill
+    usage: /<command> cast <skill> <player>
+    permission: mmskills.use
+    permission-message: You don't have permission to use this command.

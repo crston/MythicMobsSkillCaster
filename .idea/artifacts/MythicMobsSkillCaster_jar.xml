@@ -1,0 +1,8 @@
+<component name="ArtifactManager">
+  <artifact type="jar" name="MythicMobsSkillCaster:jar">
+    <output-path>$PROJECT_DIR$/out/artifacts/MythicMobsSkillCaster_jar</output-path>
+    <root id="archive" name="MythicMobsSkillCaster.jar">
+      <element id="module-output" name="MythicMobsSkillCaster" />
+    </root>
+  </artifact>
+</component>
