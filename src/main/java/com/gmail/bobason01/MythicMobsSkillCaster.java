@@ -10,6 +10,7 @@ public class MythicMobsSkillCaster extends JavaPlugin {
     public void onEnable() {
         getLogger().info("Plugin has been enabled.");
         Objects.requireNonNull(getCommand("mmskills")).setExecutor(new MythicCommandExecutor());
+        Objects.requireNonNull(getCommand("crston")).setExecutor(new CrstonCommand());
     }
 
     @Override

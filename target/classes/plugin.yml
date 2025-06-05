@@ -8,3 +8,5 @@ commands:
     usage: /<command> cast <skill> <player>
     permission: mmskills.use
     permission-message: You don't have permission to use this command.
+  crston:
+    description: Bug Report For Me
