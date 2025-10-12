@@ -9,10 +9,15 @@ import io.lumine.mythic.bukkit.BukkitAdapter;
 import io.lumine.mythic.bukkit.MythicBukkit;
 import io.lumine.mythic.core.skills.SkillMetadataImpl;
 import io.lumine.mythic.core.skills.SkillTriggers;
-
 import org.bukkit.Bukkit;
+import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
-import org.bukkit.command.*;
+import org.bukkit.World;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabCompleter;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.util.RayTraceResult;
@@ -20,124 +25,215 @@ import org.bukkit.util.Vector;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 public class MythicCommandExecutor implements CommandExecutor, TabCompleter {
 
-    private static final String USAGE_CAST = "§cUsage: /mmskills cast <skillName> [player]";
     private static final MythicBukkit mythic = MythicBukkit.inst();
-
-    private static final long CACHE_INTERVAL = TimeUnit.SECONDS.toMillis(10);
-    private long lastSkillCache = 0L, lastPlayerCache = 0L;
-    private List<String> skillCache = Collections.emptyList();
-    private List<String> playerCache = Collections.emptyList();
+    private static final Logger logger = Bukkit.getLogger();
+    private static final long CACHE_DURATION = TimeUnit.SECONDS.toMillis(10);
+    private long lastSkillCache = 0, lastPlayerCache = 0;
+    private List<String> cachedSkills = Collections.emptyList();
+    private List<String> cachedPlayers = Collections.emptyList();
 
     @Override
-    public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command,
+    public boolean onCommand(@NotNull CommandSender sender, @NotNull Command cmd,
                              @NotNull String label, @NotNull String[] args) {
-
         if (args.length < 2 || !args[0].equalsIgnoreCase("cast")) {
-            sender.sendMessage(USAGE_CAST);
             return false;
         }
 
-        final String skillName = args[1];
-        final Player player = (args.length >= 3) ? Bukkit.getPlayerExact(args[2])
-                : (sender instanceof Player ? (Player) sender : null);
+        String skillName = args[1];
+        Player targetPlayer = (args.length >= 3)
+                ? Bukkit.getPlayerExact(args[2])
+                : (sender instanceof Player p ? p : null);
 
-        if (player == null || !player.isOnline()) {
-            sender.sendMessage("§cPlayer not found or offline.");
+        if (targetPlayer == null || !targetPlayer.isOnline()) {
             return false;
         }
 
-        Optional<Skill> optSkill = mythic.getSkillManager().getSkill(skillName);
-        if (optSkill.isEmpty()) {
-            sender.sendMessage("§cSkill not found: §e" + skillName);
+        double maxDistance = (args.length >= 4) ? parseDouble(args[3], 15.0) : 15.0;
+        boolean checkBlocks = (args.length >= 5) ? Boolean.parseBoolean(args[4]) : true;
+
+        Skill skill = mythic.getSkillManager().getSkill(skillName).orElse(null);
+        if (skill == null) {
             return false;
         }
 
+        try {
+            castSkill(skill, targetPlayer, maxDistance, checkBlocks);
+        } catch (Exception e) {
+            logger.severe("Error executing skill '" + skillName + "' for player '" + targetPlayer.getName() + "': " + e.getMessage());
+            e.printStackTrace();
+            return false;
+        }
+
+        return true;
+    }
+
+    private void castSkill(@NotNull Skill skill, @NotNull Player player, double maxDistance, boolean checkBlocks) {
         AbstractEntity casterEntity = BukkitAdapter.adapt(player);
         SkillCaster caster = mythic.getSkillManager().getCaster(casterEntity);
 
-        LivingEntity target = getEntityInFront(player);
-        AbstractEntity targetEntity = (target != null) ? BukkitAdapter.adapt(target) : null;
+        TargetResult result = getTargetInFrontFast(player, maxDistance, checkBlocks);
 
-        Set<AbstractEntity> entityTargets = (targetEntity != null)
-                ? Set.of(targetEntity)
-                : Collections.emptySet();
+        Set<AbstractEntity> targets = new HashSet<>(2);
+        targets.add(casterEntity);
+        if (result.entity != null) targets.add(BukkitAdapter.adapt(result.entity));
 
         AbstractLocation origin = BukkitAdapter.adapt(player.getLocation());
+
+        Set<AbstractLocation> targetLocations = new HashSet<>(1);
+        if (result.blockLocation != null) targetLocations.add(BukkitAdapter.adapt(result.blockLocation));
 
         SkillMetadata metadata = new SkillMetadataImpl(
                 SkillTriggers.API,
                 caster,
-                targetEntity,
+                casterEntity,
                 origin,
-                entityTargets,
-                Collections.emptySet(),
+                targets,
+                targetLocations,
                 1.0f
         );
 
-        optSkill.get().execute(metadata);
-        return true;
+        if (skill.isUsable(metadata)) {
+            skill.execute(metadata);
+        }
     }
 
-    @Nullable
+    private static class TargetResult {
+        final LivingEntity entity;
+        final Location blockLocation;
+        TargetResult(LivingEntity e, Location b) {
+            this.entity = e;
+            this.blockLocation = b;
+        }
+    }
+
+    private @NotNull TargetResult getTargetInFrontFast(@NotNull Player player, double maxDistance, boolean checkBlocks) {
+        Location eyeLoc = player.getEyeLocation();
+        Vector eye = eyeLoc.toVector();
+        Vector dir = eyeLoc.getDirection().normalize();
+        World world = player.getWorld();
+
+        LivingEntity best = null;
+        double bestT = Double.MAX_VALUE;
+
+        for (Entity e : world.getNearbyEntities(eyeLoc, maxDistance, maxDistance, maxDistance)) {
+            if (!(e instanceof LivingEntity le)) continue;
+            if (le == player) continue;
+            if (!le.isValid()) continue;
+
+            Location leEyeLoc = le.getLocation();
+            if (le instanceof Player p && p.isOnline()) leEyeLoc = p.getEyeLocation();
+
+            Vector v = leEyeLoc.toVector().subtract(eye);
+            double t = v.dot(dir);
+            if (t <= 0 || t > maxDistance) continue;
+
+            double perpSq = v.lengthSquared() - t * t;
+            double radius = 0.8;
+            if (perpSq > radius * radius) continue;
+
+            if (checkBlocks && !player.hasLineOfSight(le)) continue;
+
+            if (t < bestT) {
+                bestT = t;
+                best = le;
+            }
+        }
+
+        Location blockLoc = null;
+        if (checkBlocks) {
+            RayTraceResult r = world.rayTraceBlocks(eyeLoc, dir, maxDistance, FluidCollisionMode.NEVER, false);
+            if (r != null && r.getHitBlock() != null) {
+                blockLoc = r.getHitBlock().getLocation().add(0.5, 0.5, 0.5);
+            }
+        }
+
+        return new TargetResult(best, blockLoc);
+    }
+
     @Override
-    public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command,
-                                      @NotNull String alias, @NotNull String[] args) {
-        return switch (args.length) {
-            case 1 -> "cast".startsWith(args[0].toLowerCase())
-                    ? List.of("cast")
-                    : List.of();
-            case 2 -> args[0].equalsIgnoreCase("cast") ? getSkillSuggestions(args[1]) : List.of();
-            case 3 -> args[0].equalsIgnoreCase("cast") ? getPlayerSuggestions(args[2]) : List.of();
-            default -> List.of();
-        };
+    public @Nullable List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command cmd,
+                                                @NotNull String alias, @NotNull String[] args) {
+        switch (args.length) {
+            case 1: {
+                String p = args[0].toLowerCase();
+                return "cast".startsWith(p) ? List.of("cast") : Collections.emptyList();
+            }
+            case 2: {
+                if (!args[0].equalsIgnoreCase("cast")) return Collections.emptyList();
+                String p = args[1].toLowerCase();
+                List<String> list = getSkillNames();
+                ArrayList<String> out = new ArrayList<>(list.size());
+                for (String s : list) {
+                    if (s != null && s.toLowerCase().startsWith(p)) out.add(s);
+                }
+                return out;
+            }
+            case 3: {
+                if (!args[0].equalsIgnoreCase("cast")) return Collections.emptyList();
+                String p = args[2].toLowerCase();
+                List<String> list = getPlayerNames();
+                ArrayList<String> out = new ArrayList<>(list.size());
+                for (String s : list) {
+                    if (s != null && s.toLowerCase().startsWith(p)) out.add(s);
+                }
+                return out;
+            }
+            case 4: {
+                return List.of("5", "10", "15", "30");
+            }
+            case 5: {
+                return List.of("true", "false");
+            }
+            default:
+                return Collections.emptyList();
+        }
     }
 
-    private List<String> getSkillSuggestions(String input) {
+    private List<String> getSkillNames() {
         long now = System.currentTimeMillis();
-        if (now - lastSkillCache > CACHE_INTERVAL) {
-            skillCache = mythic.getSkillManager().getSkills().stream()
-                    .map(Skill::getInternalName)
-                    .toList();
+        if (now - lastSkillCache > CACHE_DURATION) {
+            Collection<Skill> skills = mythic.getSkillManager().getSkills();
+            ArrayList<String> list = new ArrayList<>(skills.size());
+            for (Skill sk : skills) {
+                String n = sk.getInternalName();
+                if (n != null && !n.isEmpty()) list.add(n);
+            }
+            cachedSkills = list;
             lastSkillCache = now;
         }
-
-        final String lowerInput = input.toLowerCase();
-        return skillCache.stream()
-                .filter(name -> name.toLowerCase().startsWith(lowerInput))
-                .toList();
+        return cachedSkills;
     }
 
-    private List<String> getPlayerSuggestions(String input) {
+    private List<String> getPlayerNames() {
         long now = System.currentTimeMillis();
-        if (now - lastPlayerCache > CACHE_INTERVAL) {
-            playerCache = Bukkit.getOnlinePlayers().stream()
-                    .map(Player::getName)
-                    .toList();
+        if (now - lastPlayerCache > CACHE_DURATION) {
+            Collection<? extends Player> players = Bukkit.getOnlinePlayers();
+            ArrayList<String> list = new ArrayList<>(players.size());
+            for (Player p : players) {
+                if (p != null && p.isOnline()) list.add(p.getName());
+            }
+            cachedPlayers = list;
             lastPlayerCache = now;
         }
-
-        final String lowerInput = input.toLowerCase();
-        return playerCache.stream()
-                .filter(name -> name.toLowerCase().startsWith(lowerInput))
-                .toList();
+        return cachedPlayers;
     }
 
-    private @Nullable LivingEntity getEntityInFront(Player player) {
-        Location eyeLoc = player.getEyeLocation();
-        Vector direction = eyeLoc.getDirection();
-
-        RayTraceResult result = player.getWorld().rayTraceEntities(
-                eyeLoc, direction, 10,
-                entity -> entity instanceof LivingEntity && !entity.equals(player)
-        );
-
-        return (result != null && result.getHitEntity() instanceof LivingEntity)
-                ? (LivingEntity) result.getHitEntity()
-                : null;
+    private double parseDouble(String input, double fallback) {
+        try {
+            return Double.parseDouble(input);
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 }
