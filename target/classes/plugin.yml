@@ -1,11 +1,14 @@
 name: MythicMobsSkillCaster
 main: com.gmail.bobason01.MythicMobsSkillCaster
-version: 4.0
+version: 5.0
 api-version: 1.16
 commands:
   mmskills:
-    description: Cast a MythicMobs skill
-    permission: mmskills.use
-    permission-message: You don't have permission to use this command.
+    description: Cast MythicMobs skills with fast targeting and args
+    usage: /mmskills cast <skill> <player|self> <maxDistance> <checkBlocks> [args...]
+    permission: mmskillcaster.use
   crston:
     description: Bug Report For Me
+permissions:
+  mmskillcaster.use:
+    default: op
